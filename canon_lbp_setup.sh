@@ -15,10 +15,13 @@ LOGIN_USER=$(logname)
 [ -z "$LOGIN_USER" ] && LOGIN_USER=$(who | head -1 | awk '{print $1}')
 
 #Load the file containing the path to the desktop
-if [ -f ~/.config/user-dirs.dirs ]; then
-	source ~/.config/user-dirs.dirs
+DESKTOP_DIR=$(sudo -u "$LOGIN_USER" xdg-user-dir DESKTOP)
+
+if [ -n "$DESKTOP_DIR" ] && [ -d "$DESKTOP_DIR" ]; then
+    XDG_DESKTOP_DIR="$DESKTOP_DIR"
 else
-	XDG_DESKTOP_DIR="$HOME/Desktop"
+    XDG_DESKTOP_DIR="/usr/share/applications"
+    echo "Using /usr/share/applications for desktop file"
 fi
 
 #Driver version
@@ -26,14 +29,14 @@ DRIVER_VERSION='2.71-1'
 DRIVER_VERSION_COMMON='3.21-1'
 
 #Links to driver packages
-declare -A URL_DRIVER=([amd64_common]='https://github.com/hieplpvip/canon_printer/raw/master/Packages/cndrvcups-common_3.21-1_amd64.deb' \
-[amd64_capt]='https://github.com/hieplpvip/canon_printer/raw/master/Packages/cndrvcups-capt_2.71-1_amd64.deb' \
-[i386_common]='https://github.com/hieplpvip/canon_printer/raw/master/Packages/cndrvcups-common_3.21-1_i386.deb' \
-[i386_capt]='https://github.com/hieplpvip/canon_printer/raw/master/Packages/cndrvcups-capt_2.71-1_i386.deb')
+declare -A URL_DRIVER=([amd64_common]='https://github.com/fthaltun/debian_canon_printer/raw/master/Packages/cndrvcups-common_3.21-1_amd64.deb' \
+[amd64_capt]='https://github.com/fthaltun/debian_canon_printer/raw/master/Packages/cndrvcups-capt_2.71-1_amd64.deb' \
+[i386_common]='https://github.com/fthaltun/debian_canon_printer/raw/master/Packages/cndrvcups-common_3.21-1_i386.deb' \
+[i386_capt]='https://github.com/fthaltun/debian_canon_printer/raw/master/Packages/cndrvcups-capt_2.71-1_i386.deb')
 
 #Links to autoshutdowntool
-declare -A URL_ASDT=([amd64]='https://github.com/hieplpvip/canon_printer/raw/master/Packages/autoshutdowntool_1.00-1_amd64_deb.tar.gz' \
-[i386]='https://github.com/hieplpvip/canon_printer/raw/master/Packages/autoshutdowntool_1.00-1_i386_deb.tar.gz')
+declare -A URL_ASDT=([amd64]='https://github.com/fthaltun/debian_canon_printer/raw/master/Packages/autoshutdowntool_1.00-1_amd64_deb.tar.gz' \
+[i386]='https://github.com/fthaltun/debian_canon_printer/raw/master/Packages/autoshutdowntool_1.00-1_i386_deb.tar.gz')
 
 #ppd files and printer models mapping
 declare -A LASERSHOT=([LBP-810]=1120 [LBP1120]=1120 [LBP1210]=1210 \
@@ -186,14 +189,10 @@ function canon_install() {
 		check_error WGET $? $CAPT_FILE
 	fi
 	apt-get -y update
-	apt-get -y install libglade2-0 libcanberra-gtk-module
-	check_error PACKAGE $?
 	echo 'Installing common module for CUPS driver'
-	dpkg -i $COMMON_FILE
-	check_error PACKAGE $? $COMMON_FILE
 	echo 'Installing CAPT Printer Driver Module'
-	dpkg -i $CAPT_FILE
-	check_error PACKAGE $? $CAPT_FILE
+	apt install ./$CAPT_FILE ./$COMMON_FILE -yq
+	check_error PACKAGE $? "$CAPT_FILE $COMMON_FILE"
 	#Replace /etc/init.d/ccpd
 	echo '#!/bin/bash
 # startup script for Canon Printer Daemon for CUPS (ccpd)
@@ -264,10 +263,17 @@ exit 0' > /etc/init.d/ccpd
 	#Set AppArmor security profile for cupsd to complain mode
 	aa-complain /usr/sbin/cupsd
 	echo 'Restarting CUPS'
+	systemctl daemon-reload
 	service cups restart
 	if [ $ARCH == 'amd64' ]; then
 		echo 'Installing 32-bit libraries required to run 64-bit printer driver'
-		apt-get -y install libatk1.0-0:i386 libcairo2:i386 libgtk2.0-0:i386 libpango1.0-0:i386 libstdc++6:i386 libpopt0:i386 libxml2:i386 libc6:i386
+		dpkg --add-architecture i386
+		apt-get update
+		PACKAGES="libatk1.0-0:i386 libcairo2:i386 libgtk2.0-0:i386 libpango1.0-0:i386 libstdc++6:i386 libpopt0:i386 libxml2:i386 libc6:i386"
+		if grep -q '^13' /etc/debian_version; then
+			PACKAGES="libatk1.0-0:i386 libcairo2:i386 libgtk2.0-0:i386 libpango-1.0-0:i386 libstdc++6:i386 libpopt0:i386 libxml2:i386 libc6:i386"
+		fi
+		apt-get -y install $PACKAGES
 		check_error PACKAGE $?
 	fi
 	echo 'Installing the printer in CUPS'
@@ -293,6 +299,7 @@ exit 0' > /etc/init.d/ccpd
 			done
 		fi
 		echo -e "\e[2KRunning ccpd"
+		systemctl daemon-reload
 		service ccpd restart
 		#Autoload ccpd
 		if [ $INIT_SYSTEM == 'systemd' ]; then
@@ -315,9 +322,13 @@ GenericName=Status monitor for Canon CAPT Printer
 Exec=captstatusui -P '$NAMEPRINTER'
 Terminal=false
 Type=Application
-Icon=/usr/share/icons/Humanity/devices/48/printer.svg' > "${XDG_DESKTOP_DIR}/$NAMEPRINTER.desktop"
+Icon=printer' > "${XDG_DESKTOP_DIR}/$NAMEPRINTER.desktop"
 		chmod 775 "${XDG_DESKTOP_DIR}/$NAMEPRINTER.desktop"
-		chown $LOGIN_USER:$LOGIN_USER "${XDG_DESKTOP_DIR}/$NAMEPRINTER.desktop"
+		if [ "$XDG_DESKTOP_DIR" != "/usr/share/applications" ]; then
+			chown "$LOGIN_USER:$LOGIN_USER" "${XDG_DESKTOP_DIR}/${NAMEPRINTER}.desktop"
+			sudo -u $LOGIN_USER dbus-launch gio set "${XDG_DESKTOP_DIR}/${NAMEPRINTER}.desktop" "metadata::trusted" true
+			sudo -u $LOGIN_USER dbus-launch gio set -t string "${XDG_DESKTOP_DIR}/${NAMEPRINTER}.desktop" metadata::xfce-exe-checksum "$(sha256sum "${XDG_DESKTOP_DIR}/${NAMEPRINTER}.desktop" | awk '{print $1}')"
+		fi
 		#Install autoshutdowntool for supported models
 		if [[ "${!ASDT_SUPPORTED_MODELS[@]}" =~ "$NAMEPRINTER" ]]; then
 			SERIALRANGE=(${ASDT_SUPPORTED_MODELS[$NAMEPRINTER]})
